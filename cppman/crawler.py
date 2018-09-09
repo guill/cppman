@@ -231,11 +231,11 @@ class Crawler(object):
         link_port = rx.group(4) if rx.group(4) else url_port
         link_path = quote(rx.group(5), '/%') if rx.group(5) else url_path
         link_query = quote(rx.group(6), '?=&%') if rx.group(6) else ''
-        link_dir_path = os.path.dirname(link_path)
 
         if not link_full_url and not link.startswith('/'):
             link_path = os.path.normpath(os.path.join(url_dir_path, link_path))
 
+        link_dir_path = os.path.dirname(link_path)
         link_url = link_proto + link_host + link_port + link_path + link_query
 
         if self.follow_mode == self.F_ANY:

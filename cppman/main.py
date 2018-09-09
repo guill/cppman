@@ -53,13 +53,25 @@ class Cppman(Crawler):
             'http://www.cplusplus.com/reference/string/swap/'
         ]
 
-    def extract_name(self, data):
+    def cleanup_name(self, name):
         """Extract man page name from web page."""
-        name = re.search('<h1[^>]*>(.+?)</h1>', data).group(1)
         name = re.sub(r'<([^>]+)>', r'', name)
         name = re.sub(r'&gt;', r'>', name)
         name = re.sub(r'&lt;', r'<', name)
+        name = re.sub(r'&amp;', r'&', name)
+        name = name.strip()
         return name
+
+    def extract_primary_name(self, data):
+        primary_name = re.search('<h1[^>]*>(.+?)</h1>', data).group(1)
+        return self.cleanup_name(primary_name)
+
+    def extract_search_names(self, data):
+        """Extract man page name from web page."""
+        names = [ self.extract_primary_name(data) ]
+        for name in re.findall('''<strong class="selflink">([^<]+)</strong>''', data):
+            names.append(self.cleanup_name(name))
+        return list(set(names))
 
     def rebuild_index(self):
         """Rebuild index database from cplusplus.com and cppreference.com."""
@@ -71,9 +83,9 @@ class Cppman(Crawler):
         self.db_conn = sqlite3.connect(environ.index_db_re)
         self.db_cursor = self.db_conn.cursor()
         self.db_cursor.execute('CREATE TABLE "cplusplus.com" '
-                               '(name VARCHAR(255), url VARCHAR(255), std VARCHAR(255))')
+                               '(name VARCHAR(255), url VARCHAR(255), std VARCHAR(255), searchname VARCHAR(255))')
         self.db_cursor.execute('CREATE TABLE "cppreference.com" '
-                               '(name VARCHAR(255), url VARCHAR(255), std VARCHAR(255))')
+                               '(name VARCHAR(255), url VARCHAR(255), std VARCHAR(255), searchname VARCHAR(255))')
 
         try:
             self.add_url_filter('\.(jpg|jpeg|gif|png|js|css|swf|svg)$')
@@ -81,8 +93,8 @@ class Cppman(Crawler):
 
             # cplusplus.com
             self.crawl('http://www.cplusplus.com/reference/')
-            for name, url, std in self.results:
-                self.insert_index('cplusplus.com', name, url, std)
+            for name, url, std, searchname in self.results:
+                self.insert_index('cplusplus.com', name, url, std, searchname)
             self.db_conn.commit()
 
             # Rename duplicate entries
@@ -105,17 +117,17 @@ class Cppman(Crawler):
 
                         new_name = '%s (%s)' % (n, group)
                         self.db_cursor.execute('UPDATE "cplusplus.com" '
-                                               'SET name="%s", url="%s" '
+                                               'SET name="%s", url="%s", searchname="%s" '
                                                'WHERE url="%s"' %
-                                               (new_name, u, u))
+                                               (new_name, u, new_name, u))
             self.db_conn.commit()
 
             # cppreference.com
             self.results = set()
             self.crawl('http://en.cppreference.com/w/cpp', '/w/cpp')
 
-            for name, url, std in self.results:
-                self.insert_index('cppreference.com', name, url, std)
+            for name, url, std, searchname in self.results:
+                self.insert_index('cppreference.com', name, url, std, searchname)
             self.db_conn.commit()
 
         except KeyboardInterrupt:
@@ -128,27 +140,42 @@ class Cppman(Crawler):
         """callback to insert index"""
         if doc.url not in self.blacklist:
             print("Indexing '%s' %s..." % (doc.url, std))
-            name = self.extract_name(doc.text)
-            self.results.add((name, doc.url, std))
+            primary_name = self.extract_primary_name(doc.text)
+            for search_name in self.extract_search_names(doc.text):
+                print("Name '%s' alias for '%s' at URL '%s'" % (search_name, primary_name, doc.url))
+                self.results.add((primary_name, doc.url, std, search_name))
         else:
             print("Skipping blacklisted page '%s' ..." % doc.url)
             return None
 
-    def insert_index(self, table, name, url, std=""):
+    def insert_index(self, table, name, url, std, searchname):
         """callback to insert index"""
-        names = name.split(',')
+        searchnames = searchname.split(',')
+        searchnames = [n.strip() for n in searchnames]
 
-        if len(names) > 1:
-            m = re.match(r'^\s*(.*?::(?:operator)?)([^:]*)\s*$', names[0])
+        if len(searchnames) > 1:
+            m = re.match(r'^\s*(.*?(?::)?(?:operator)?)([^:]*)\s*$', searchnames[0])
             if m:
-                prefix = m.group(1)
-                names[0] = m.group(2)
-                names = [prefix + n for n in names]
+                prefix = m.group(1) if m.group(1) else ""
+                searchnames[0] = m.group(2)
+                searchnames = [n if n.startswith(prefix) else prefix + n for n in searchnames]
+            m = re.match(r'^\s*(.*?)\s*(\(.+\))?\s*$', searchnames[len(searchnames)-1])
+            if m:
+                suffix = m.group(2) if m.group(2) else ""
+                searchnames[len(searchnames)-1] = m.group(1)
+                searchnames = [n if n.endswith(suffix) else n + suffix for n in searchnames]
 
-        for n in names:
+        searchnames = [n.strip() for n in searchnames]
+
+        """Fix up the URL. For some reason the cppreference archive has some wrong"""
+        m = re.match(r'^(.+)\.1\.html$', url)
+        if m:
+            url = m.group(1) + ".html"
+
+        for n in searchnames:
             self.db_cursor.execute(
-                'INSERT INTO "%s" (name, url, std) VALUES ("%s", "%s", "%s")' %
-                (table, n.strip(), url, std))
+                'INSERT INTO "%s" (name, url, std, searchname) VALUES ("%s", "%s", "%s", "%s")' %
+                (table, name.strip(), url, std, n.strip()))
 
     def cache_all(self):
         """Cache all available man pages"""
@@ -178,9 +205,9 @@ class Cppman(Crawler):
 
         source = environ.config.source
         print('Caching manpages from %s ...' % source)
-        data = cursor.execute('SELECT * FROM "%s"' % source).fetchall()
+        data = cursor.execute('SELECT name, url FROM "%s"' % source).fetchall()
 
-        for name, url, _ in data:
+        for name, url in data:
             print('Caching %s ...' % name)
             retries = 3
             while retries > 0:
@@ -245,20 +272,20 @@ class Cppman(Crawler):
         try:
             page_name, url = cursor.execute(
                 'SELECT name,url FROM "%s" '
-                'WHERE name="%s" ORDER BY LENGTH(name)'
+                'WHERE searchname="%s" ORDER BY LENGTH(searchname)'
                 % (environ.source, pattern)).fetchone()
         except TypeError:
             # Try standard library
             try:
                 page_name, url = cursor.execute(
                     'SELECT name,url FROM "%s" '
-                    'WHERE name="std::%s" ORDER BY LENGTH(name)'
+                    'WHERE searchname="std::%s" ORDER BY LENGTH(searchname)'
                     % (environ.source, pattern)).fetchone()
             except TypeError:
                 try:
                     page_name, url = cursor.execute(
                         'SELECT name,url FROM "%s" '
-                        'WHERE name LIKE "%%%s%%" ORDER BY LENGTH(name)'
+                        'WHERE searchname LIKE "%%%s%%" ORDER BY LENGTH(searchname)'
                         % (environ.source, pattern)).fetchone()
                 except TypeError:
                     raise RuntimeError('No manual entry for ' + pattern)
@@ -290,8 +317,8 @@ class Cppman(Crawler):
         conn = sqlite3.connect(environ.index_db)
         cursor = conn.cursor()
         selected = cursor.execute(
-            'SELECT * FROM "%s" WHERE name '
-            'LIKE "%%%s%%" ORDER BY LENGTH(name)'
+            'SELECT * FROM "%s" WHERE searchname '
+            'LIKE "%%%s%%" ORDER BY LENGTH(searchname)'
             % (environ.source, pattern)).fetchall()
 
         pat = re.compile('(%s)' % pattern, re.I)

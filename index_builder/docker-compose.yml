@@ -1,0 +1,22 @@
+version: "3"
+services:
+    cppreference_mirror:
+        image: python
+        expose:
+            - 80
+        restart: "no"
+        volumes:
+            - ./:/index_builder
+        command: ["/index_builder/mirror.sh"]
+    scraper:
+        image: cppman_scraper
+        build:
+            context: ./scraper_context
+            dockerfile: ./ScraperDockerfile
+        depends_on:
+            - cppreference_mirror
+        restart: "no"
+        volumes:
+            - ../:/cppman_root
+            - ./:/index_builder
+        command: ["/index_builder/scraper.sh"]
